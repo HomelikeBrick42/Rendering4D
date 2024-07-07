@@ -1,0 +1,8 @@
+[package]
+name = "rendering4d"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { version = "1.0.86", features = ["backtrace"] }
+eframe = { version = "0.28.1", default-features = false, features = ["default_fonts", "wgpu"] }
