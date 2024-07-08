@@ -133,6 +133,17 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &eframe::egui::Context, frame: &mut eframe::Frame) {
+        egui::Window::new("Camera").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Fov:");
+                ui.add(
+                    egui::DragValue::new(&mut self.camera.fov)
+                        .speed(0.1)
+                        .range(1.0..=179.0),
+                );
+            });
+        });
+
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(egui::Color32::from_rgb(255, 0, 255)))
             .show(ctx, |ui| {
@@ -165,7 +176,7 @@ impl eframe::App for App {
                         size: wgpu::Extent3d {
                             width,
                             height,
-                            depth_or_array_layers: 1,
+                            depth_or_array_layers: old_image_size.depth_or_array_layers,
                         },
                         mip_level_count: self.main_texture.mip_level_count(),
                         sample_count: self.main_texture.sample_count(),

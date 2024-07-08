@@ -26,9 +26,9 @@ fn main(
     var uv = vec2<f32>(coords) / vec2<f32>(size);
 
     let ray_origin = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-    var ray_direction = vec4<f32>(uv * 2.0 - 1.0, 1.0, 0.0);
-    ray_direction.x *= camera.tan_half_fov;
+    var ray_direction = vec4<f32>(1.0, uv.yx * 2.0 - 1.0, 0.0);
     ray_direction.y *= aspect * camera.tan_half_fov;
+    ray_direction.z *= camera.tan_half_fov;
     ray_direction = normalize(ray_direction);
 
     let color = ray_direction.xyz * 0.5 + 0.5;
