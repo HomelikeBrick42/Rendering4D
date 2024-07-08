@@ -1,12 +1,25 @@
 #![deny(rust_2018_idioms, rust_2024_compatibility)]
 
 use eframe::{egui, egui_wgpu, wgpu};
+use encase::{ShaderSize, ShaderType, UniformBuffer};
+
+#[derive(ShaderType)]
+struct GpuCamera {
+    tan_half_fov: f32,
+}
+
+struct Camera {
+    fov: f32,
+}
 
 pub struct App {
+    camera: Camera,
     main_texture: wgpu::Texture,
     main_texture_id: egui::TextureId,
     main_texture_bind_group_layout: wgpu::BindGroupLayout,
     main_texture_bind_group: wgpu::BindGroup,
+    camera_uniform_buffer: wgpu::Buffer,
+    camera_bind_group: wgpu::BindGroup,
     pipeline: wgpu::ComputePipeline,
 }
 
@@ -61,11 +74,40 @@ impl App {
             }],
         });
 
+        let camera_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Camera Uniform Buffer"),
+            size: GpuCamera::SHADER_SIZE.get(),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::UNIFORM,
+            mapped_at_creation: false,
+        });
+        let camera_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Camera Bind Group Layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: Some(GpuCamera::SHADER_SIZE),
+                    },
+                    count: None,
+                }],
+            });
+        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Camera Bind Group"),
+            layout: &camera_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_uniform_buffer.as_entire_binding(),
+            }],
+        });
+
         let shader = device.create_shader_module(wgpu::include_wgsl!("./shader.wgsl"));
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Pipeline Layout"),
-            bind_group_layouts: &[&main_texture_bind_group_layout],
+            bind_group_layouts: &[&main_texture_bind_group_layout, &camera_bind_group_layout],
             push_constant_ranges: &[],
         });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -77,10 +119,13 @@ impl App {
         });
 
         Ok(Self {
+            camera: Camera { fov: 90.0 },
             main_texture,
             main_texture_id,
             main_texture_bind_group_layout,
             main_texture_bind_group,
+            camera_uniform_buffer,
+            camera_bind_group,
             pipeline,
         })
     }
@@ -151,6 +196,16 @@ impl eframe::App for App {
                         });
                 }
 
+                {
+                    let mut buffer = UniformBuffer::new([0; GpuCamera::SHADER_SIZE.get() as _]);
+                    buffer
+                        .write(&GpuCamera {
+                            tan_half_fov: f32::tan(self.camera.fov.to_radians() / 2.0),
+                        })
+                        .unwrap();
+                    queue.write_buffer(&self.camera_uniform_buffer, 0, &buffer.into_inner());
+                }
+
                 let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("Encoder"),
                 });
@@ -163,10 +218,11 @@ impl eframe::App for App {
                     let mut compute_pass =
                         encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                             label: Some("Compute pass"),
-                            ..Default::default()
+                            timestamp_writes: None,
                         });
                     compute_pass.set_pipeline(&self.pipeline);
                     compute_pass.set_bind_group(0, &self.main_texture_bind_group, &[]);
+                    compute_pass.set_bind_group(1, &self.camera_bind_group, &[]);
                     compute_pass.dispatch_workgroups(dispatch_with as _, dispatch_height as _, 1);
                 }
                 queue.submit(std::iter::once(encoder.finish()));
