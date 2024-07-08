@@ -3,12 +3,67 @@
 var output_texture: texture_storage_2d<rgba8unorm, write>;
 
 struct Camera {
+    position: vec4<f32>,
     tan_half_fov: f32,
 }
 
 @group(1)
 @binding(0)
 var<uniform> camera: Camera;
+
+struct HyperSphere {
+    position: vec4<f32>,
+    color: vec3<f32>,
+    radius: f32,
+}
+
+struct HyperSpheres {
+    count: u32,
+    data: array<HyperSphere>,
+}
+
+@group(2)
+@binding(0)
+var<storage, read> hyper_spheres: HyperSpheres;
+
+struct Ray {
+    origin: vec4<f32>,
+    direction: vec4<f32>,
+}
+
+struct Hit {
+    hit: bool,
+    color: vec3<f32>,
+    distance: f32,
+}
+
+fn intersect_hyper_sphere(ray: Ray, hyper_sphere: HyperSphere) -> Hit {
+    var hit: Hit;
+    hit.hit = false;
+
+    let oc = ray.origin - hyper_sphere.position;
+    let a = dot(ray.direction, ray.direction);
+    let half_b = dot(oc, ray.direction);
+    let c = dot(oc, oc) - hyper_sphere.radius * hyper_sphere.radius;
+    let discriminant = half_b * half_b - a * c;
+
+    if discriminant < 0.0 {
+        return hit;
+    }
+
+    let sqrt_discriminant = sqrt(discriminant);
+    let t0 = (-half_b - sqrt_discriminant) / a;
+    let t1 = (-half_b + sqrt_discriminant) / a;
+
+    hit.distance = t0;
+    if hit.distance < 0.0 {
+        return hit;
+    }
+
+    hit.color = hyper_sphere.color;
+    hit.hit = true;
+    return hit;
+}
 
 @compute
 @workgroup_size(16, 16)
@@ -25,12 +80,26 @@ fn main(
     var aspect = f32(size.x) / f32(size.y);
     var uv = vec2<f32>(coords) / vec2<f32>(size);
 
-    let ray_origin = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-    var ray_direction = vec4<f32>(1.0, uv.yx * 2.0 - 1.0, 0.0);
-    ray_direction.y *= aspect * camera.tan_half_fov;
-    ray_direction.z *= camera.tan_half_fov;
-    ray_direction = normalize(ray_direction);
+    var ray: Ray;
+    ray.origin = camera.position;
+    ray.direction = vec4<f32>(1.0, uv.yx * 2.0 - 1.0, 0.0);
+    ray.direction.y *= camera.tan_half_fov;
+    ray.direction.z *= aspect * camera.tan_half_fov;
+    ray.direction = normalize(ray.direction);
 
-    let color = ray_direction.xyz * 0.5 + 0.5;
+    var closest_hit: Hit;
+    closest_hit.hit = false;
+    for (var i = 0u; i < hyper_spheres.count; i += 1u) {
+        let hit = intersect_hyper_sphere(ray, hyper_spheres.data[i]);
+        if hit.hit && (!closest_hit.hit || hit.distance < closest_hit.distance) {
+            closest_hit = hit;
+        }
+    }
+
+    var color = vec3<f32>(0.0, 0.0, 0.0);
+    if closest_hit.hit {
+        color = closest_hit.color;
+    }
+
     textureStore(output_texture, coords, vec4<f32>(color, 1.0));
 }

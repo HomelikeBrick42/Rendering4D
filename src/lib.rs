@@ -1,15 +1,39 @@
 #![deny(rust_2018_idioms, rust_2024_compatibility)]
 
 use eframe::{egui, egui_wgpu, wgpu};
-use encase::{ShaderSize, ShaderType, UniformBuffer};
+use encase::{ArrayLength, ShaderSize, ShaderType, StorageBuffer, UniformBuffer};
 
 #[derive(ShaderType)]
 struct GpuCamera {
+    position: cgmath::Vector4<f32>,
     tan_half_fov: f32,
 }
 
+#[derive(ShaderType)]
+struct GpuHyperSphere {
+    position: cgmath::Vector4<f32>,
+    color: cgmath::Vector3<f32>,
+    radius: f32,
+}
+
+#[derive(ShaderType)]
+struct GpuHyperSpheres<'a> {
+    count: ArrayLength,
+    #[size(runtime)]
+    data: &'a [GpuHyperSphere],
+}
+
 struct Camera {
+    position: cgmath::Vector4<f32>,
     fov: f32,
+}
+
+struct HyperSphere {
+    name: String,
+    id: usize,
+    position: cgmath::Vector4<f32>,
+    color: cgmath::Vector3<f32>,
+    radius: f32,
 }
 
 pub struct App {
@@ -20,7 +44,30 @@ pub struct App {
     main_texture_bind_group: wgpu::BindGroup,
     camera_uniform_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
+    hyper_spheres: Vec<HyperSphere>,
+    hyper_sphere_next_id: usize,
+    hyper_spheres_changed: bool,
+    hyper_spheres_storage_buffer: wgpu::Buffer,
+    hyper_spheres_bind_group_layout: wgpu::BindGroupLayout,
+    hyper_spheres_bind_group: wgpu::BindGroup,
     pipeline: wgpu::ComputePipeline,
+}
+
+fn vec4_ui(ui: &mut egui::Ui, value: &mut cgmath::Vector4<f32>) -> bool {
+    let mut changed = false;
+    changed |= ui
+        .add(egui::DragValue::new(&mut value.x).speed(0.1).prefix("x:"))
+        .changed();
+    changed |= ui
+        .add(egui::DragValue::new(&mut value.y).speed(0.1).prefix("y:"))
+        .changed();
+    changed |= ui
+        .add(egui::DragValue::new(&mut value.z).speed(0.1).prefix("z:"))
+        .changed();
+    changed |= ui
+        .add(egui::DragValue::new(&mut value.w).speed(0.1).prefix("w:"))
+        .changed();
+    changed
 }
 
 impl App {
@@ -103,11 +150,44 @@ impl App {
             }],
         });
 
+        let hyper_spheres_storage_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Hyper Spheres Storage Buffer"),
+            size: GpuHyperSpheres::min_size().get(),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let hyper_spheres_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Hyper Spheres Bind Group Layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: Some(GpuHyperSpheres::min_size()),
+                    },
+                    count: None,
+                }],
+            });
+        let hyper_spheres_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Hyper Spheres Bind Group"),
+            layout: &hyper_spheres_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: hyper_spheres_storage_buffer.as_entire_binding(),
+            }],
+        });
+
         let shader = device.create_shader_module(wgpu::include_wgsl!("./shader.wgsl"));
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Pipeline Layout"),
-            bind_group_layouts: &[&main_texture_bind_group_layout, &camera_bind_group_layout],
+            bind_group_layouts: &[
+                &main_texture_bind_group_layout,
+                &camera_bind_group_layout,
+                &hyper_spheres_bind_group_layout,
+            ],
             push_constant_ranges: &[],
         });
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -119,13 +199,28 @@ impl App {
         });
 
         Ok(Self {
-            camera: Camera { fov: 90.0 },
+            camera: Camera {
+                position: cgmath::vec4(0.0, 0.0, 0.0, 0.0),
+                fov: 90.0,
+            },
             main_texture,
             main_texture_id,
             main_texture_bind_group_layout,
             main_texture_bind_group,
             camera_uniform_buffer,
             camera_bind_group,
+            hyper_spheres: vec![HyperSphere {
+                name: "Default Hyper Sphere".into(),
+                id: 0,
+                position: cgmath::vec4(2.0, 0.0, 0.0, 0.0),
+                color: cgmath::vec3(1.0, 0.0, 0.0),
+                radius: 1.0,
+            }],
+            hyper_sphere_next_id: 1,
+            hyper_spheres_changed: true,
+            hyper_spheres_storage_buffer,
+            hyper_spheres_bind_group_layout,
+            hyper_spheres_bind_group,
             pipeline,
         })
     }
@@ -135,6 +230,10 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &eframe::egui::Context, frame: &mut eframe::Frame) {
         egui::Window::new("Camera").show(ctx, |ui| {
             ui.horizontal(|ui| {
+                ui.label("Position:");
+                vec4_ui(ui, &mut self.camera.position);
+            });
+            ui.horizontal(|ui| {
                 ui.label("Fov:");
                 ui.add(
                     egui::DragValue::new(&mut self.camera.fov)
@@ -142,7 +241,65 @@ impl eframe::App for App {
                         .range(1.0..=179.0),
                 );
             });
+            ui.allocate_space(ui.available_size());
         });
+
+        egui::Window::new("Hyper Spheres")
+            .hscroll(false)
+            .vscroll(false)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink(false)
+                    .show(ui, |ui| {
+                        self.hyper_spheres.retain_mut(|hyper_sphere| {
+                            let mut delete = false;
+                            egui::CollapsingHeader::new(&hyper_sphere.name)
+                                .id_source(hyper_sphere.id)
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        ui.label("Name:");
+                                        ui.text_edit_singleline(&mut hyper_sphere.name);
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("Position:");
+                                        self.hyper_spheres_changed |=
+                                            vec4_ui(ui, &mut hyper_sphere.position);
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("Radius:");
+                                        self.hyper_spheres_changed |= ui
+                                            .add(
+                                                egui::DragValue::new(&mut hyper_sphere.radius)
+                                                    .speed(0.1),
+                                            )
+                                            .changed();
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("Color:");
+                                        self.hyper_spheres_changed |= ui
+                                            .color_edit_button_rgb(hyper_sphere.color.as_mut())
+                                            .changed();
+                                    });
+                                    if ui.button("Delete").clicked() {
+                                        delete = true;
+                                    }
+                                });
+                            self.hyper_spheres_changed |= delete;
+                            !delete
+                        });
+                        if ui.button("New Hyper Sphere").clicked() {
+                            self.hyper_spheres_changed = true;
+                            self.hyper_spheres.push(HyperSphere {
+                                name: "New Hyper Sphere".into(),
+                                id: self.hyper_sphere_next_id,
+                                position: cgmath::vec4(2.0, 0.0, 0.0, 0.0),
+                                color: cgmath::vec3(1.0, 1.0, 1.0),
+                                radius: 1.0,
+                            });
+                            self.hyper_sphere_next_id += 1;
+                        }
+                    });
+            });
 
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(egui::Color32::from_rgb(255, 0, 255)))
@@ -211,10 +368,62 @@ impl eframe::App for App {
                     let mut buffer = UniformBuffer::new([0; GpuCamera::SHADER_SIZE.get() as _]);
                     buffer
                         .write(&GpuCamera {
+                            position: self.camera.position,
                             tan_half_fov: f32::tan(self.camera.fov.to_radians() / 2.0),
                         })
                         .unwrap();
                     queue.write_buffer(&self.camera_uniform_buffer, 0, &buffer.into_inner());
+                }
+
+                if self.hyper_spheres_changed {
+                    let gpu_hyper_spheres = GpuHyperSpheres {
+                        count: ArrayLength,
+                        data: &self
+                            .hyper_spheres
+                            .iter()
+                            .map(
+                                |&HyperSphere {
+                                     name: _,
+                                     id: _,
+                                     position,
+                                     color,
+                                     radius,
+                                 }| GpuHyperSphere {
+                                    position,
+                                    color,
+                                    radius,
+                                },
+                            )
+                            .collect::<Vec<_>>(),
+                    };
+
+                    let mut buffer = StorageBuffer::new(Vec::<u8>::with_capacity(
+                        gpu_hyper_spheres.size().get() as _,
+                    ));
+                    buffer.write(&gpu_hyper_spheres).unwrap();
+                    let buffer = buffer.into_inner();
+
+                    let new_size = buffer.len().try_into().unwrap();
+                    if self.hyper_spheres_storage_buffer.size() < new_size {
+                        self.hyper_spheres_storage_buffer =
+                            device.create_buffer(&wgpu::BufferDescriptor {
+                                label: Some("Hyper Spheres Storage Buffer"),
+                                size: new_size,
+                                usage: self.hyper_spheres_storage_buffer.usage(),
+                                mapped_at_creation: false,
+                            });
+                        self.hyper_spheres_bind_group =
+                            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                                label: Some("Hyper Spheres Bind Group"),
+                                layout: &self.hyper_spheres_bind_group_layout,
+                                entries: &[wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: self.hyper_spheres_storage_buffer.as_entire_binding(),
+                                }],
+                            });
+                    }
+
+                    queue.write_buffer(&self.hyper_spheres_storage_buffer, 0, &buffer);
                 }
 
                 let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -234,6 +443,7 @@ impl eframe::App for App {
                     compute_pass.set_pipeline(&self.pipeline);
                     compute_pass.set_bind_group(0, &self.main_texture_bind_group, &[]);
                     compute_pass.set_bind_group(1, &self.camera_bind_group, &[]);
+                    compute_pass.set_bind_group(2, &self.hyper_spheres_bind_group, &[]);
                     compute_pass.dispatch_workgroups(dispatch_with as _, dispatch_height as _, 1);
                 }
                 queue.submit(std::iter::once(encoder.finish()));
