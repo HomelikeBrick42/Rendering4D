@@ -5,6 +5,8 @@ var output_texture: texture_storage_2d<rgba8unorm, write>;
 struct Camera {
     position: vec4<f32>,
     tan_half_fov: f32,
+    up_sky_color: vec3<f32>,
+    down_sky_color: vec3<f32>,
 }
 
 @group(1)
@@ -65,6 +67,10 @@ fn intersect_hyper_sphere(ray: Ray, hyper_sphere: HyperSphere) -> Hit {
     return hit;
 }
 
+fn sky_color(ray: Ray) -> vec3<f32> {
+    return mix(camera.down_sky_color, camera.up_sky_color, ray.direction.y * 0.5 + 0.5);
+}
+
 @compute
 @workgroup_size(16, 16)
 fn main(
@@ -96,7 +102,7 @@ fn main(
         }
     }
 
-    var color = vec3<f32>(0.0, 0.0, 0.0);
+    var color = sky_color(ray);
     if closest_hit.hit {
         color = closest_hit.color;
     }

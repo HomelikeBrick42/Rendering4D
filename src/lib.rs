@@ -7,6 +7,8 @@ use encase::{ArrayLength, ShaderSize, ShaderType, StorageBuffer, UniformBuffer};
 struct GpuCamera {
     position: cgmath::Vector4<f32>,
     tan_half_fov: f32,
+    up_sky_color: cgmath::Vector3<f32>,
+    down_sky_color: cgmath::Vector3<f32>,
 }
 
 #[derive(ShaderType)]
@@ -26,6 +28,8 @@ struct GpuHyperSpheres<'a> {
 struct Camera {
     position: cgmath::Vector4<f32>,
     fov: f32,
+    up_sky_color: cgmath::Vector3<f32>,
+    down_sky_color: cgmath::Vector3<f32>,
 }
 
 struct HyperSphere {
@@ -46,28 +50,21 @@ pub struct App {
     camera_bind_group: wgpu::BindGroup,
     hyper_spheres: Vec<HyperSphere>,
     hyper_sphere_next_id: usize,
-    hyper_spheres_changed: bool,
     hyper_spheres_storage_buffer: wgpu::Buffer,
     hyper_spheres_bind_group_layout: wgpu::BindGroupLayout,
     hyper_spheres_bind_group: wgpu::BindGroup,
     pipeline: wgpu::ComputePipeline,
 }
 
-fn vec4_ui(ui: &mut egui::Ui, value: &mut cgmath::Vector4<f32>) -> bool {
-    let mut changed = false;
-    changed |= ui
-        .add(egui::DragValue::new(&mut value.x).speed(0.1).prefix("x:"))
+fn vec4_ui(ui: &mut egui::Ui, value: &mut cgmath::Vector4<f32>) {
+    ui.add(egui::DragValue::new(&mut value.x).speed(0.1).prefix("x:"))
         .changed();
-    changed |= ui
-        .add(egui::DragValue::new(&mut value.y).speed(0.1).prefix("y:"))
+    ui.add(egui::DragValue::new(&mut value.y).speed(0.1).prefix("y:"))
         .changed();
-    changed |= ui
-        .add(egui::DragValue::new(&mut value.z).speed(0.1).prefix("z:"))
+    ui.add(egui::DragValue::new(&mut value.z).speed(0.1).prefix("z:"))
         .changed();
-    changed |= ui
-        .add(egui::DragValue::new(&mut value.w).speed(0.1).prefix("w:"))
+    ui.add(egui::DragValue::new(&mut value.w).speed(0.1).prefix("w:"))
         .changed();
-    changed
 }
 
 impl App {
@@ -202,6 +199,8 @@ impl App {
             camera: Camera {
                 position: cgmath::vec4(0.0, 0.0, 0.0, 0.0),
                 fov: 90.0,
+                up_sky_color: cgmath::vec3(0.2, 0.7, 0.9),
+                down_sky_color: cgmath::vec3(0.2, 0.2, 0.2),
             },
             main_texture,
             main_texture_id,
@@ -217,7 +216,6 @@ impl App {
                 radius: 1.0,
             }],
             hyper_sphere_next_id: 1,
-            hyper_spheres_changed: true,
             hyper_spheres_storage_buffer,
             hyper_spheres_bind_group_layout,
             hyper_spheres_bind_group,
@@ -241,6 +239,14 @@ impl eframe::App for App {
                         .range(1.0..=179.0),
                 );
             });
+            ui.horizontal(|ui| {
+                ui.label("Up Sky Color:");
+                ui.color_edit_button_rgb(self.camera.up_sky_color.as_mut());
+            });
+            ui.horizontal(|ui| {
+                ui.label("Down Sky Color:");
+                ui.color_edit_button_rgb(self.camera.down_sky_color.as_mut());
+            });
             ui.allocate_space(ui.available_size());
         });
 
@@ -262,33 +268,26 @@ impl eframe::App for App {
                                     });
                                     ui.horizontal(|ui| {
                                         ui.label("Position:");
-                                        self.hyper_spheres_changed |=
-                                            vec4_ui(ui, &mut hyper_sphere.position);
+                                        vec4_ui(ui, &mut hyper_sphere.position);
                                     });
                                     ui.horizontal(|ui| {
                                         ui.label("Radius:");
-                                        self.hyper_spheres_changed |= ui
-                                            .add(
-                                                egui::DragValue::new(&mut hyper_sphere.radius)
-                                                    .speed(0.1),
-                                            )
-                                            .changed();
+                                        ui.add(
+                                            egui::DragValue::new(&mut hyper_sphere.radius)
+                                                .speed(0.1),
+                                        );
                                     });
                                     ui.horizontal(|ui| {
                                         ui.label("Color:");
-                                        self.hyper_spheres_changed |= ui
-                                            .color_edit_button_rgb(hyper_sphere.color.as_mut())
-                                            .changed();
+                                        ui.color_edit_button_rgb(hyper_sphere.color.as_mut());
                                     });
                                     if ui.button("Delete").clicked() {
                                         delete = true;
                                     }
                                 });
-                            self.hyper_spheres_changed |= delete;
                             !delete
                         });
                         if ui.button("New Hyper Sphere").clicked() {
-                            self.hyper_spheres_changed = true;
                             self.hyper_spheres.push(HyperSphere {
                                 name: "New Hyper Sphere".into(),
                                 id: self.hyper_sphere_next_id,
@@ -366,16 +365,24 @@ impl eframe::App for App {
 
                 {
                     let mut buffer = UniformBuffer::new([0; GpuCamera::SHADER_SIZE.get() as _]);
+                    let Camera {
+                        position,
+                        fov,
+                        up_sky_color,
+                        down_sky_color,
+                    } = self.camera;
                     buffer
                         .write(&GpuCamera {
-                            position: self.camera.position,
-                            tan_half_fov: f32::tan(self.camera.fov.to_radians() / 2.0),
+                            position,
+                            tan_half_fov: f32::tan(fov.to_radians() / 2.0),
+                            up_sky_color,
+                            down_sky_color,
                         })
                         .unwrap();
                     queue.write_buffer(&self.camera_uniform_buffer, 0, &buffer.into_inner());
                 }
 
-                if self.hyper_spheres_changed {
+                {
                     let gpu_hyper_spheres = GpuHyperSpheres {
                         count: ArrayLength,
                         data: &self
