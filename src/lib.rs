@@ -9,6 +9,9 @@ struct GpuCamera {
     tan_half_fov: f32,
     up_sky_color: cgmath::Vector3<f32>,
     down_sky_color: cgmath::Vector3<f32>,
+    bounce_count: u32,
+    sample_count: u32,
+    seed_offset: u32,
 }
 
 #[derive(ShaderType)]
@@ -30,6 +33,8 @@ struct Camera {
     fov: f32,
     up_sky_color: cgmath::Vector3<f32>,
     down_sky_color: cgmath::Vector3<f32>,
+    bounce_count: u32,
+    sample_count: u32,
 }
 
 struct HyperSphere {
@@ -199,8 +204,10 @@ impl App {
             camera: Camera {
                 position: cgmath::vec4(0.0, 0.0, 0.0, 0.0),
                 fov: 90.0,
-                up_sky_color: cgmath::vec3(0.2, 0.7, 0.9),
+                up_sky_color: cgmath::vec3(0.7, 0.7, 1.0),
                 down_sky_color: cgmath::vec3(0.2, 0.2, 0.2),
+                bounce_count: 4,
+                sample_count: 1,
             },
             main_texture,
             main_texture_id,
@@ -212,7 +219,7 @@ impl App {
                 name: "Default Hyper Sphere".into(),
                 id: 0,
                 position: cgmath::vec4(2.0, 0.0, 0.0, 0.0),
-                color: cgmath::vec3(1.0, 0.0, 0.0),
+                color: cgmath::vec3(0.9, 0.1, 0.1),
                 radius: 1.0,
             }],
             hyper_sphere_next_id: 1,
@@ -246,6 +253,16 @@ impl eframe::App for App {
             ui.horizontal(|ui| {
                 ui.label("Down Sky Color:");
                 ui.color_edit_button_rgb(self.camera.down_sky_color.as_mut());
+            });
+            ui.horizontal(|ui| {
+                ui.label("Bounce Count:");
+                ui.add(egui::DragValue::new(&mut self.camera.bounce_count).speed(1));
+                self.camera.bounce_count = self.camera.bounce_count.max(1);
+            });
+            ui.horizontal(|ui| {
+                ui.label("Sample Count:");
+                ui.add(egui::DragValue::new(&mut self.camera.sample_count).speed(1));
+                self.camera.sample_count = self.camera.sample_count.max(1);
             });
             ui.allocate_space(ui.available_size());
         });
@@ -292,7 +309,7 @@ impl eframe::App for App {
                                 name: "New Hyper Sphere".into(),
                                 id: self.hyper_sphere_next_id,
                                 position: cgmath::vec4(2.0, 0.0, 0.0, 0.0),
-                                color: cgmath::vec3(1.0, 1.0, 1.0),
+                                color: cgmath::vec3(0.9, 0.9, 0.9),
                                 radius: 1.0,
                             });
                             self.hyper_sphere_next_id += 1;
@@ -370,6 +387,8 @@ impl eframe::App for App {
                         fov,
                         up_sky_color,
                         down_sky_color,
+                        bounce_count,
+                        sample_count,
                     } = self.camera;
                     buffer
                         .write(&GpuCamera {
@@ -377,6 +396,9 @@ impl eframe::App for App {
                             tan_half_fov: f32::tan(fov.to_radians() / 2.0),
                             up_sky_color,
                             down_sky_color,
+                            bounce_count,
+                            sample_count,
+                            seed_offset: rand::random(),
                         })
                         .unwrap();
                     queue.write_buffer(&self.camera_uniform_buffer, 0, &buffer.into_inner());

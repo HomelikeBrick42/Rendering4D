@@ -12,3 +12,4 @@ eframe = { version = "0.28.1", default-features = false, features = [
     "persistence",
 ] }
 encase = { version = "0.9.0", features = ["cgmath"] }
+rand = "0.8.5"
