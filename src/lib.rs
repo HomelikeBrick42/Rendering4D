@@ -12,6 +12,7 @@ struct GpuCamera {
     bounce_count: u32,
     sample_count: u32,
     seed_offset: u32,
+    frame_count: u32,
 }
 
 #[derive(ShaderType)]
@@ -47,8 +48,12 @@ struct HyperSphere {
 
 pub struct App {
     camera: Camera,
+    texture: wgpu::Texture,
+    texture_id: egui::TextureId,
+    texture_bind_group_layout: wgpu::BindGroupLayout,
+    texture_bind_group: wgpu::BindGroup,
+    texture_copy_pipeline: wgpu::ComputePipeline,
     main_texture: wgpu::Texture,
-    main_texture_id: egui::TextureId,
     main_texture_bind_group_layout: wgpu::BindGroupLayout,
     main_texture_bind_group: wgpu::BindGroup,
     camera_uniform_buffer: wgpu::Buffer,
@@ -58,18 +63,25 @@ pub struct App {
     hyper_spheres_storage_buffer: wgpu::Buffer,
     hyper_spheres_bind_group_layout: wgpu::BindGroupLayout,
     hyper_spheres_bind_group: wgpu::BindGroup,
-    pipeline: wgpu::ComputePipeline,
+    raytracing_pipeline: wgpu::ComputePipeline,
+    frame_count: u32,
 }
 
-fn vec4_ui(ui: &mut egui::Ui, value: &mut cgmath::Vector4<f32>) {
-    ui.add(egui::DragValue::new(&mut value.x).speed(0.1).prefix("x:"))
+fn vec4_ui(ui: &mut egui::Ui, value: &mut cgmath::Vector4<f32>) -> bool {
+    let mut changed = false;
+    changed |= ui
+        .add(egui::DragValue::new(&mut value.x).speed(0.1).prefix("x:"))
         .changed();
-    ui.add(egui::DragValue::new(&mut value.y).speed(0.1).prefix("y:"))
+    changed |= ui
+        .add(egui::DragValue::new(&mut value.y).speed(0.1).prefix("y:"))
         .changed();
-    ui.add(egui::DragValue::new(&mut value.z).speed(0.1).prefix("z:"))
+    changed |= ui
+        .add(egui::DragValue::new(&mut value.z).speed(0.1).prefix("z:"))
         .changed();
-    ui.add(egui::DragValue::new(&mut value.w).speed(0.1).prefix("w:"))
+    changed |= ui
+        .add(egui::DragValue::new(&mut value.w).speed(0.1).prefix("w:"))
         .changed();
+    changed
 }
 
 impl App {
@@ -78,6 +90,49 @@ impl App {
             device, renderer, ..
         } = cc.wgpu_render_state.as_ref().unwrap();
 
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Texture"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+            view_formats: &[],
+        });
+        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let texture_id = renderer.write().register_native_texture(
+            device,
+            &texture_view,
+            wgpu::FilterMode::Nearest,
+        );
+
+        let texture_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Texture Bind Group Layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: texture.format(),
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                }],
+            });
+        let texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Texture Bind Group"),
+            layout: &texture_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&texture_view),
+            }],
+        });
         let main_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Main Texture"),
             size: wgpu::Extent3d {
@@ -88,26 +143,20 @@ impl App {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            format: wgpu::TextureFormat::Rgba32Float,
+            usage: wgpu::TextureUsages::STORAGE_BINDING,
             view_formats: &[],
         });
         let main_texture_view = main_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let main_texture_id = renderer.write().register_native_texture(
-            device,
-            &main_texture_view,
-            wgpu::FilterMode::Nearest,
-        );
-
         let main_texture_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("Texture Bind Group Layout"),
+                label: Some("Main Texture Bind Group Layout"),
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::StorageTexture {
-                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        access: wgpu::StorageTextureAccess::ReadWrite,
                         format: main_texture.format(),
                         view_dimension: wgpu::TextureViewDimension::D2,
                     },
@@ -115,13 +164,30 @@ impl App {
                 }],
             });
         let main_texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Texture Bind Group"),
+            label: Some("Main Texture Bind Group"),
             layout: &main_texture_bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: wgpu::BindingResource::TextureView(&main_texture_view),
             }],
         });
+
+        let texture_copy_shader =
+            device.create_shader_module(wgpu::include_wgsl!("./texture_copy.wgsl"));
+        let texture_copy_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Texture Copy Pipeline Layout"),
+                bind_group_layouts: &[&texture_bind_group_layout, &main_texture_bind_group_layout],
+                push_constant_ranges: &[],
+            });
+        let texture_copy_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Texture Copy Pipeline"),
+                layout: Some(&texture_copy_pipeline_layout),
+                module: &texture_copy_shader,
+                entry_point: "main",
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            });
 
         let camera_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Camera Uniform Buffer"),
@@ -181,24 +247,26 @@ impl App {
             }],
         });
 
-        let shader = device.create_shader_module(wgpu::include_wgsl!("./shader.wgsl"));
-
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Pipeline Layout"),
-            bind_group_layouts: &[
-                &main_texture_bind_group_layout,
-                &camera_bind_group_layout,
-                &hyper_spheres_bind_group_layout,
-            ],
-            push_constant_ranges: &[],
-        });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("Pipeline"),
-            layout: Some(&pipeline_layout),
-            module: &shader,
-            entry_point: "main",
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        });
+        let raytracing_shader =
+            device.create_shader_module(wgpu::include_wgsl!("./raytracing.wgsl"));
+        let raytracing_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Raytracing Pipeline Layout"),
+                bind_group_layouts: &[
+                    &main_texture_bind_group_layout,
+                    &camera_bind_group_layout,
+                    &hyper_spheres_bind_group_layout,
+                ],
+                push_constant_ranges: &[],
+            });
+        let raytracing_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("Raytracing Pipeline"),
+                layout: Some(&raytracing_pipeline_layout),
+                module: &raytracing_shader,
+                entry_point: "main",
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            });
 
         Ok(Self {
             camera: Camera {
@@ -209,8 +277,12 @@ impl App {
                 bounce_count: 4,
                 sample_count: 1,
             },
+            texture,
+            texture_id,
+            texture_bind_group_layout,
+            texture_bind_group,
+            texture_copy_pipeline,
             main_texture,
-            main_texture_id,
             main_texture_bind_group_layout,
             main_texture_bind_group,
             camera_uniform_buffer,
@@ -226,7 +298,8 @@ impl App {
             hyper_spheres_storage_buffer,
             hyper_spheres_bind_group_layout,
             hyper_spheres_bind_group,
-            pipeline,
+            raytracing_pipeline,
+            frame_count: 0,
         })
     }
 }
@@ -236,32 +309,59 @@ impl eframe::App for App {
         egui::Window::new("Camera").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Position:");
-                vec4_ui(ui, &mut self.camera.position);
+                if vec4_ui(ui, &mut self.camera.position) {
+                    self.frame_count = 0;
+                }
             });
             ui.horizontal(|ui| {
                 ui.label("Fov:");
-                ui.add(
-                    egui::DragValue::new(&mut self.camera.fov)
-                        .speed(0.1)
-                        .range(1.0..=179.0),
-                );
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut self.camera.fov)
+                            .speed(0.1)
+                            .range(1.0..=179.0),
+                    )
+                    .changed()
+                {
+                    self.frame_count = 0;
+                }
             });
             ui.horizontal(|ui| {
                 ui.label("Up Sky Color:");
-                ui.color_edit_button_rgb(self.camera.up_sky_color.as_mut());
+                if ui
+                    .color_edit_button_rgb(self.camera.up_sky_color.as_mut())
+                    .changed()
+                {
+                    self.frame_count = 0;
+                }
             });
             ui.horizontal(|ui| {
                 ui.label("Down Sky Color:");
-                ui.color_edit_button_rgb(self.camera.down_sky_color.as_mut());
+                if ui
+                    .color_edit_button_rgb(self.camera.down_sky_color.as_mut())
+                    .changed()
+                {
+                    self.frame_count = 0;
+                };
             });
             ui.horizontal(|ui| {
                 ui.label("Bounce Count:");
-                ui.add(egui::DragValue::new(&mut self.camera.bounce_count).speed(1));
+                if ui
+                    .add(egui::DragValue::new(&mut self.camera.bounce_count).speed(1))
+                    .changed()
+                {
+                    self.frame_count = 0;
+                };
                 self.camera.bounce_count = self.camera.bounce_count.max(1);
             });
             ui.horizontal(|ui| {
                 ui.label("Sample Count:");
-                ui.add(egui::DragValue::new(&mut self.camera.sample_count).speed(1));
+                if ui
+                    .add(egui::DragValue::new(&mut self.camera.sample_count).speed(1))
+                    .changed()
+                {
+                    self.frame_count = 0;
+                };
                 self.camera.sample_count = self.camera.sample_count.max(1);
             });
             ui.allocate_space(ui.available_size());
@@ -285,20 +385,33 @@ impl eframe::App for App {
                                     });
                                     ui.horizontal(|ui| {
                                         ui.label("Position:");
-                                        vec4_ui(ui, &mut hyper_sphere.position);
+                                        if vec4_ui(ui, &mut hyper_sphere.position) {
+                                            self.frame_count = 0;
+                                        }
                                     });
                                     ui.horizontal(|ui| {
                                         ui.label("Radius:");
-                                        ui.add(
-                                            egui::DragValue::new(&mut hyper_sphere.radius)
-                                                .speed(0.1),
-                                        );
+                                        if ui
+                                            .add(
+                                                egui::DragValue::new(&mut hyper_sphere.radius)
+                                                    .speed(0.1),
+                                            )
+                                            .changed()
+                                        {
+                                            self.frame_count = 0;
+                                        }
                                     });
                                     ui.horizontal(|ui| {
                                         ui.label("Color:");
-                                        ui.color_edit_button_rgb(hyper_sphere.color.as_mut());
+                                        if ui
+                                            .color_edit_button_rgb(hyper_sphere.color.as_mut())
+                                            .changed()
+                                        {
+                                            self.frame_count = 0;
+                                        }
                                     });
                                     if ui.button("Delete").clicked() {
+                                        self.frame_count = 0;
                                         delete = true;
                                     }
                                 });
@@ -313,6 +426,7 @@ impl eframe::App for App {
                                 radius: 1.0,
                             });
                             self.hyper_sphere_next_id += 1;
+                            self.frame_count = 0;
                         }
                     });
             });
@@ -344,6 +458,40 @@ impl eframe::App for App {
                     && height > 0
                     && (old_image_size.width != width || old_image_size.height != height)
                 {
+                    self.texture = device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("Texture"),
+                        size: wgpu::Extent3d {
+                            width,
+                            height,
+                            depth_or_array_layers: old_image_size.depth_or_array_layers,
+                        },
+                        mip_level_count: self.texture.mip_level_count(),
+                        sample_count: self.texture.sample_count(),
+                        dimension: self.texture.dimension(),
+                        format: self.texture.format(),
+                        usage: self.texture.usage(),
+                        view_formats: &[],
+                    });
+                    let texture_view = self
+                        .texture
+                        .create_view(&wgpu::TextureViewDescriptor::default());
+                    renderer.write().update_egui_texture_from_wgpu_texture(
+                        device,
+                        &texture_view,
+                        wgpu::FilterMode::Nearest,
+                        self.texture_id,
+                    );
+
+                    self.texture_bind_group =
+                        device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("Texture Bind Group"),
+                            layout: &self.texture_bind_group_layout,
+                            entries: &[wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(&texture_view),
+                            }],
+                        });
+
                     self.main_texture = device.create_texture(&wgpu::TextureDescriptor {
                         label: Some("Main Texture"),
                         size: wgpu::Extent3d {
@@ -362,13 +510,6 @@ impl eframe::App for App {
                         .main_texture
                         .create_view(&wgpu::TextureViewDescriptor::default());
 
-                    renderer.write().update_egui_texture_from_wgpu_texture(
-                        device,
-                        &main_texture_view,
-                        wgpu::FilterMode::Nearest,
-                        self.main_texture_id,
-                    );
-
                     self.main_texture_bind_group =
                         device.create_bind_group(&wgpu::BindGroupDescriptor {
                             label: Some("Main Texture Bind Group"),
@@ -378,6 +519,8 @@ impl eframe::App for App {
                                 resource: wgpu::BindingResource::TextureView(&main_texture_view),
                             }],
                         });
+
+                    self.frame_count = 0;
                 }
 
                 {
@@ -399,6 +542,7 @@ impl eframe::App for App {
                             bounce_count,
                             sample_count,
                             seed_offset: rand::random(),
+                            frame_count: self.frame_count,
                         })
                         .unwrap();
                     queue.write_buffer(&self.camera_uniform_buffer, 0, &buffer.into_inner());
@@ -469,16 +613,22 @@ impl eframe::App for App {
                             label: Some("Compute pass"),
                             timestamp_writes: None,
                         });
-                    compute_pass.set_pipeline(&self.pipeline);
+                    compute_pass.set_pipeline(&self.raytracing_pipeline);
                     compute_pass.set_bind_group(0, &self.main_texture_bind_group, &[]);
                     compute_pass.set_bind_group(1, &self.camera_bind_group, &[]);
                     compute_pass.set_bind_group(2, &self.hyper_spheres_bind_group, &[]);
                     compute_pass.dispatch_workgroups(dispatch_with as _, dispatch_height as _, 1);
+
+                    compute_pass.set_pipeline(&self.texture_copy_pipeline);
+                    compute_pass.set_bind_group(0, &self.texture_bind_group, &[]);
+                    compute_pass.set_bind_group(1, &self.main_texture_bind_group, &[]);
+                    compute_pass.dispatch_workgroups(dispatch_with as _, dispatch_height as _, 1);
                 }
                 queue.submit(std::iter::once(encoder.finish()));
+                self.frame_count += 1;
 
                 ui.painter().image(
-                    self.main_texture_id,
+                    self.texture_id,
                     rect,
                     egui::Rect::from_min_max(egui::pos2(0.0, 1.0), egui::pos2(1.0, 0.0)),
                     egui::Color32::WHITE,

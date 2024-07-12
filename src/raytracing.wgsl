@@ -1,6 +1,6 @@
 @group(0)
 @binding(0)
-var output_texture: texture_storage_2d<rgba8unorm, write>;
+var texture: texture_storage_2d<rgba32float, read_write>;
 
 struct Camera {
     position: vec4<f32>,
@@ -10,6 +10,7 @@ struct Camera {
     bounce_count: u32,
     sample_count: u32,
     seed_offset: u32,
+    frame_count: u32,
 }
 
 @group(1)
@@ -155,7 +156,7 @@ fn trace(ray_: Ray, state: ptr<function, u32>) -> vec3<f32> {
 fn main(
     @builtin(global_invocation_id) global_id: vec3<u32>
 ) {
-    let size = textureDimensions(output_texture);
+    let size = textureDimensions(texture);
     let coords = global_id.xy;
 
     if coords.x >= size.x || coords.y >= size.y {
@@ -182,5 +183,7 @@ fn main(
     }
     color /= f32(camera.sample_count);
 
-    textureStore(output_texture, coords, vec4<f32>(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0));
+    let old_color = textureLoad(texture, coords).rgb;
+    let new_color = old_color + ((color - old_color) / f32(camera.frame_count + 1));
+    textureStore(texture, coords, vec4<f32>(clamp(new_color, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0));
 }
